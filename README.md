@@ -35,7 +35,7 @@ Caddy :443          — TLS termination, static file serving
   ▼
 auth-gate :9090     — auth, quota, voucher logic
   ▼
-ZeroClaw :42616     — LLM inference
+ZeroClaw :123456     — LLM inference
 ```
 
 All three services run on a single Debian VPS. Only Caddy is internet-facing.
