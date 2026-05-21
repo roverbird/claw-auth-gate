@@ -4,6 +4,7 @@ google_client_id = "YOUR_CLIENT_ID.apps.googleusercontent.com"
 upstream_url     = "ws://127.0.0.1:12345/ws/chat" # Zeroclaw port, set up at Zeroclaw Onboard
 upstream_token   = "your-upstream-token"   # Zeroclaw ws token, you get it from Zeroclaw after pairing ws with zeroclaw 
 free_limit       = 3 # How many free prompts do you allow your web users?
+rate_limit_per_minute  = 6                        # rate limiting web user prompts, optional, omit to disable
 payment_url      = "https://your-payment-link" # Sumup, stripe, crypto, what not
 db_path          = "/var/lib/auth-gate/usage.db" # Database of your chatbot users
 # test_mode      = true                    # dev only — disables JWT # 'false' in prod
