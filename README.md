@@ -16,6 +16,7 @@ has a logic to sell prompt quotas as vouchers.
 - Verifies Google JWT tokens during the WebSocket handshake
 - Tracks per-user prompt usage in SQLite
 - Enforces a configurable free tier limit
+- Rate limits prompts per user per minute (optional)
 - Accepts voucher codes to extend a user's quota (pay-as-you-go)
 - Forwards authenticated, within-quota sessions to the upstream AI backend
 - Emits structured JSON events to the frontend for limit and redemption states
@@ -33,9 +34,9 @@ Browser
   ▼
 Caddy :443          — TLS termination, static file serving
   ▼
-auth-gate :9090     — auth, quota, voucher logic
+auth-gate :9090     — auth, rate limit, quota, voucher logic
   ▼
-ZeroClaw :123456     — LLM inference
+ZeroClaw :123456    — LLM inference
 ```
 
 All three services run on a single Debian VPS. Only Caddy is internet-facing.
@@ -73,15 +74,30 @@ Gate blocks when `count >= quota`.
 ```toml
 # /etc/auth-gate/config.toml
 
-listen_port      = 9090
-google_client_id = "YOUR_CLIENT_ID.apps.googleusercontent.com"
-upstream_url     = "ws://127.0.0.1:42616/ws/chat"
-upstream_token   = "your-upstream-token"   # optional
-free_limit       = 3
-payment_url      = "https://your-payment-link"
-db_path          = "/var/lib/auth-gate/usage.db"
-# test_mode      = true                    # dev only — disables JWT
+listen_port            = 9090
+google_client_id       = "YOUR_CLIENT_ID.apps.googleusercontent.com"
+upstream_url           = "ws://127.0.0.1:42616/ws/chat"
+upstream_token         = "your-upstream-token"   # optional
+free_limit             = 3
+payment_url            = "https://your-payment-link"
+db_path                = "/var/lib/auth-gate/usage.db"
+rate_limit_per_minute  = 6                        # optional — omit to disable
+# test_mode            = true                     # dev only — disables JWT
 ```
+
+### All config parameters
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `listen_port` | u16 | yes | Port to bind on localhost |
+| `google_client_id` | string | yes | Google OAuth2 client ID |
+| `upstream_url` | string | yes | Upstream WebSocket URL |
+| `free_limit` | u64 | yes | Free prompts given to every new user |
+| `payment_url` | string | yes | Shown in `system_limit` event |
+| `db_path` | string | yes | SQLite file path |
+| `upstream_token` | string | no | Bearer token injected into upstream requests |
+| `rate_limit_per_minute` | u32 | no | Max prompts per user per 60s window |
+| `test_mode` | bool | no | Bypass JWT verification (dev only) |
 
 ---
 
@@ -134,10 +150,16 @@ auth-gate intercepts two message types. Everything else passes through untouched
 
 ```json
 { "type": "system_limit",  "content": "...", "payment_url": "..." }
+{ "type": "rate_limited",  "content": "Too many messages. Please wait a moment.", "retry_after_secs": 60 }
 { "type": "redeem_ok",     "prompts_added": 50, "prompts_used": 3, "prompts_total": 53 }
 { "type": "redeem_error",  "content": "invalid code" }
 { "type": "system_error",  "content": "Service unavailable" }
 ```
+
+**Message check order** (per incoming prompt):
+1. Rate limit — if exceeded → `rate_limited`, block
+2. Quota — if exhausted → `system_limit`, block
+3. Forward to upstream → increment count
 
 ---
 
@@ -167,18 +189,6 @@ sqlite3 /var/lib/auth-gate/usage.db \
 # Update binary
 cargo build --release
 sudo cp target/release/auth-gate /usr/local/bin/auth-gate
-sudo systemctl restart auth-gate
-```
-
----
-
-## Schema migration
-
-If upgrading from a version before the quota column existed:
-
-```bash
-sqlite3 /var/lib/auth-gate/usage.db \
-  "ALTER TABLE usage ADD COLUMN quota INTEGER NOT NULL DEFAULT 0;"
 sudo systemctl restart auth-gate
 ```
 

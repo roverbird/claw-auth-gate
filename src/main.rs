@@ -14,6 +14,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use tokio::{net::TcpListener, sync::{mpsc, RwLock}};
+use dashmap::DashMap;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as TungMessage};
 
@@ -27,8 +28,9 @@ struct Config {
     free_limit:       u64,
     stripe_url:       String,   // any payment / info URL shown at limit
     db_path:          String,
-    test_mode:        Option<bool>,
-    upstream_token:   Option<String>,
+    test_mode:             Option<bool>,
+    upstream_token:        Option<String>,
+    rate_limit_per_minute: Option<u32>,   // max prompts per user per 60s window
 }
 
 impl Config {
@@ -185,7 +187,38 @@ fn pseudo_rand() -> u64 {
     (seed.wrapping_mul(6364136223846793005).wrapping_add(c)).wrapping_add(1442695040888963407)
 }
 
-// ── Google JWKS cache ─────────────────────────────────────────────────────────
+// ── Rate limiting ─────────────────────────────────────────────────────────────
+
+struct RateBucket {
+    count:        u32,
+    window_start: Instant,
+}
+
+// Returns true if the request is allowed, false if rate limit exceeded
+fn rate_check(map: &DashMap<String, RateBucket>, email: &str, limit: u32) -> bool {
+    let now = Instant::now();
+    let window = Duration::from_secs(60);
+
+    let mut bucket = map.entry(email.to_string()).or_insert(RateBucket {
+        count:        0,
+        window_start: now,
+    });
+
+    // Reset window if a full minute has passed
+    if bucket.window_start.elapsed() >= window {
+        bucket.count        = 0;
+        bucket.window_start = now;
+    }
+
+    if bucket.count >= limit {
+        return false; // exceeded
+    }
+
+    bucket.count += 1;
+    true
+}
+
+
 
 #[derive(Debug, Deserialize, Clone)]
 struct Jwk { kid: String, n: String, e: String }
@@ -240,10 +273,11 @@ async fn verify_google_jwt(
 
 #[derive(Clone)]
 struct AppState {
-    config: Config,
-    db:     DbPool,
-    http:   HttpClient,
-    certs:  CertsCache,
+    config:       Config,
+    db:           DbPool,
+    http:         HttpClient,
+    certs:        CertsCache,
+    rate_buckets: Arc<DashMap<String, RateBucket>>,
 }
 
 // ── WebSocket handler ─────────────────────────────────────────────────────────
@@ -348,6 +382,18 @@ async fn handle_socket(client_ws: WebSocket, email: String, state: AppState) {
 
             // ── Prompt ────────────────────────────────────────────────────────
             Some("message") => {
+                // Rate limit check (if configured)
+                if let Some(limit) = state.config.rate_limit_per_minute {
+                    if !rate_check(&state.rate_buckets, &email, limit) {
+                        println!("🚦 {email} rate limited");
+                        let _ = tx.send(Message::Text(serde_json::json!({
+                            "type":              "rate_limited",
+                            "content":           "Too many messages. Please wait a moment.",
+                            "retry_after_secs":  60,
+                        }).to_string().into())).await;
+                        continue;
+                    }
+                }
                 let (count, quota) = db_get_usage(&state.db, &email);
 
                 if count >= quota {
@@ -454,12 +500,16 @@ async fn main() {
     println!("🚪 auth-gate on 127.0.0.1:{port}");
     println!("→  upstream : {}", config.upstream_url);
     println!("→  limit    : {} prompts", config.free_limit);
+    println!("→  rate     : {}", config.rate_limit_per_minute
+        .map(|r| format!("{r} prompts/min"))
+        .unwrap_or_else(|| "unlimited".into()));
     println!("→  mode     : {}", if config.test_mode == Some(true) { "TEST (no JWT)" } else { "production" });
 
     let state = AppState {
         db,
-        http:  HttpClient::new(),
-        certs: Arc::new(RwLock::new(None)),
+        http:         HttpClient::new(),
+        certs:        Arc::new(RwLock::new(None)),
+        rate_buckets: Arc::new(DashMap::new()),
         config,
     };
 
