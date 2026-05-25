@@ -1,12 +1,12 @@
 [package]
 name          = "claw-auth-gate"
 version       = "0.1.0"
-edition       = "2021"
+edition       = "2026"
 description   = "A lightweight authentication gateway and session manager for zeroclaw built with Axum and SQLite."
 license       = "MIT"
 repository    = "https://github.com/roverbird/claw-auth-gate"
 readme        = "README.md"
-keywords      = ["auth", "axum", "gateway", "jwt", "sqlite", "zeroclaw"]
+keywords      = ["axum", "gateway", "jwt", "sqlite", "zeroclaw"]
 categories    = ["web-programming", "authentication"]
 
 [dependencies]
